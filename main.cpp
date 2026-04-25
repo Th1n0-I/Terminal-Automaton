@@ -3,98 +3,165 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
 #include <thread>
 #include <chrono>
+#include <mutex>
 
 using namespace ftxui;
 
-uint64_t grid[32];
-uint64_t nextGrid[32];
-uint32_t skipRow = 0;
+int GRID_WIDTH = 1024;
+int GRID_HEIGHT = 1024;
+int GRID_CHUNKS = (GRID_WIDTH + 63) / 64;
 
-void setCell (int x, int y) {grid[x] |= (1ULL << y);}
-void clearCell (int x, int y) {grid[x] &= ~(1ULL << y);}
-bool getCell (int x, int y) {return (grid[x] & (1ULL << y)) != 0;}
+int stepCount = 0;
+
+std::vector<std::vector<uint64_t>> grid;
+std::vector<std::vector<uint64_t>> nextGrid;
+
+std::mutex gridMutex;
+
+bool deadRowSkipping = false;
+
+void GenerateGrid() {
+    grid.assign(GRID_HEIGHT, std::vector<uint64_t>(GRID_CHUNKS, 0));
+    nextGrid.assign(GRID_HEIGHT, std::vector<uint64_t>(GRID_CHUNKS, 0));
+}
+
+void setCellGrid (int x, int y) {grid[x][y / 64] |= (1ULL << (y % 64));}
+void clearCellGrid (int x, int y) {grid[x][y / 64] &= ~(1ULL << (y % 64));}
+bool getCellGrid (int x, int y) {return (grid[x][y / 64] & (1ULL << (y % 64))) != 0;}
+
+bool isRowEmpty (int x) {
+    for (auto& chunk : grid[x]) {
+        if (chunk != 0) return false;
+    }
+    return true;
+}
 
 void step(){
-    memset(nextGrid, 0, sizeof(nextGrid));
-    for (int i = 0; i < 32; i++) {
-        if (grid[i] == 0 && (i - 1 < 0 || grid[i - 1] == 0) && (i + 1 >= 32 || grid[i + 1] == 0)) {
-            skipRow |= (1ULL << i);
-            continue;
+    stepCount++;
+    for(auto& row : nextGrid) std::fill(row.begin(), row.end(), 0);
+    for (int i = 0; i < GRID_HEIGHT; i++) {
+        bool above = (i > 0) && !isRowEmpty(i - 1);
+        bool current = !isRowEmpty(i);
+        bool below = (i < GRID_HEIGHT - 1) && !isRowEmpty(i + 1);
+        if (!above && !current && !below && deadRowSkipping) continue;
+
+        for (int c = 0; c < GRID_CHUNKS; c++) {
+            uint64_t activity = 0;
+            if (i > 0) activity |= grid[i - 1][c];
+            activity |= grid[i][c];
+            if (i < GRID_HEIGHT - 1) activity |= grid[i + 1][c];
+
+            if (c > 0) {
+                if (i > 0) activity |= (grid[i - 1][c - 1]);
+                activity |= (grid[i][c - 1]);
+                if (i < GRID_HEIGHT - 1) activity |= (grid[i + 1][c - 1]);
+            }
+
+            if (c < GRID_CHUNKS - 1) {
+                if (i > 0) activity |= (grid[i - 1][c + 1]);
+                activity |= (grid[i][c + 1]);
+                if (i < GRID_HEIGHT - 1) activity |= (grid[i + 1][c + 1]);
+            }
+            if (activity == 0 && deadRowSkipping) {
+                c++; // Skip next chunk as well since it can't have any activity
+                continue;
+            }
         }
-        break;
-    }
-    for (int i = 0; i < 32; i++) {
-        //if (skipRow & (1ULL << i)) continue;
-        for (int j = 0; j < 64; j++) {
+
+        for(int j = 0; j < GRID_WIDTH; j++) {
             uint8_t cellNeighbours = 0;
             for (int x = -1; x <= 1; x++) {
                 for (int y = -1; y <= 1; y++) {
                     if (x == 0 && y == 0) continue;
                     int neighbourX = i + x;
                     int neighbourY = j + y;
-                    if (neighbourX >= 0 && neighbourX < 32 && neighbourY >= 0 && neighbourY < 64) {
-                        if (getCell(neighbourX, neighbourY)) cellNeighbours++;
+                    if (neighbourX >= 0 && neighbourX < GRID_HEIGHT && neighbourY >= 0 && neighbourY < GRID_WIDTH) {
+                        if (getCellGrid(neighbourX, neighbourY)) cellNeighbours++;
                     }
                 }
             }
-            if(cellNeighbours == 3 || (cellNeighbours == 2 && getCell(i, j))) nextGrid[i] |= (1ULL << j);
+            if (cellNeighbours == 3 || (cellNeighbours == 2 && getCellGrid(i, j))) nextGrid[i][j / 64] |= (1ULL << (j % 64));
         }
     }
-    memcpy(grid, nextGrid, sizeof(grid));
 }
 
 int main() {
+    GenerateGrid();
 
     // Gosper Glider Gun
-setCell(2, 25);
-setCell(3, 23); setCell(3, 25);
-setCell(4, 13); setCell(4, 14); setCell(4, 21); setCell(4, 22); setCell(4, 35); setCell(4, 36);
-setCell(5, 12); setCell(5, 16); setCell(5, 21); setCell(5, 22); setCell(5, 35); setCell(5, 36);
-setCell(6, 1);  setCell(6, 2);  setCell(6, 11); setCell(6, 17); setCell(6, 21); setCell(6, 22);
-setCell(7, 1);  setCell(7, 2);  setCell(7, 11); setCell(7, 15); setCell(7, 17); setCell(7, 18); setCell(7, 23); setCell(7, 25);
-setCell(8, 11); setCell(8, 17); setCell(8, 25);
-setCell(9, 12); setCell(9, 16);
-setCell(10, 13); setCell(10, 14);
+    setCellGrid(2, 25);
+    setCellGrid(3, 23); setCellGrid(3, 25);
+    setCellGrid(4, 13); setCellGrid(4, 14); setCellGrid(4, 21); setCellGrid(4, 22); setCellGrid(4, 35); setCellGrid(4, 36);
+    setCellGrid(5, 12); setCellGrid(5, 16); setCellGrid(5, 21); setCellGrid(5, 22); setCellGrid(5, 35); setCellGrid(5, 36);
+    setCellGrid(6, 1);  setCellGrid(6, 2);  setCellGrid(6, 11); setCellGrid(6, 17); setCellGrid(6, 21); setCellGrid(6, 22);
+    setCellGrid(7, 1);  setCellGrid(7, 2);  setCellGrid(7, 11); setCellGrid(7, 15); setCellGrid(7, 17); setCellGrid(7, 18); setCellGrid(7, 23); setCellGrid(7, 25);
+    setCellGrid(8, 11); setCellGrid(8, 17); setCellGrid(8, 25);
+    setCellGrid(9, 12); setCellGrid(9, 16);
+    setCellGrid(10, 13); setCellGrid(10, 14);
+
+
 
     auto screen = ScreenInteractive::Fullscreen();
-    auto duration = std::chrono::duration<double, std::micro>(0);
-    auto averageDuration = std::chrono::duration<double, std::micro>(0);
+    double duration = 0.0;
+    double averageDuration = 0.0;
     int stepCount = 0;
     std::thread([&] {
         while (true) {
             auto start = std::chrono::high_resolution_clock::now();
             step();
             auto end = std::chrono::high_resolution_clock::now();
+            std::lock_guard<std::mutex> lock(gridMutex);
+            grid = nextGrid;
             stepCount++;
-            duration = std::chrono::duration<double, std::micro>(end - start);
+            duration = std::chrono::duration<double, std::micro>(end - start).count();
             averageDuration = ((averageDuration * (stepCount - 1)) + duration) / stepCount;
+        }
+    }).detach();
+
+    std::thread([&] {
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(330));
             screen.PostEvent(Event::Custom);
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
     }).detach();
 
     auto renderer = ftxui::Renderer([&] {
+
+        auto termWidth = Terminal::Size().dimx;
+        auto termHeight = Terminal::Size().dimy;
+
+        int visibleColls = min(GRID_WIDTH, termWidth);
+        int visibleRows = min(GRID_HEIGHT, termHeight);
+
+        std::lock_guard<std::mutex> lock(gridMutex);
         Elements rows;
-        for (int i = 0; i < 32; i++) {
+        for (int i = 0; i < visibleRows; i++) {
             Elements cells;
-            for (int j = 0; j < 64; j++) {
-                cells.push_back(getCell(i, j) ? text("O") : text(" "));
+            for (int j = 0; j < visibleColls; j++) {
+                cells.push_back(getCellGrid(i, j) ? text("O") : text(" "));
             }
             rows.push_back(hbox(cells));
         }
         return hbox(
-            border(vbox(rows)),
-            vbox({
+            border(vbox(rows)) | flex,
+            border(vbox({
                 text("Conway's Game of Life"),
                 text("Gosper Glider Gun"),
                 text("Press Ctrl+C to exit"),
-                text("stepTime: " + std::to_string(duration.count()) + " us"),
-                text("Average time per step: " + std::to_string(averageDuration.count()) + " us")
-            }));
+                text("stepTime: " + std::to_string(duration / 1000.0) + " ms"),
+                text("Average time per step: " + std::to_string(averageDuration / 1000.0) + " ms"),
+                text("Step: " + std::to_string(stepCount)),
+                hbox({
+                    text("Dead Row Skipping: "),
+                    text(deadRowSkipping ? "ON" : "OFF") | color(deadRowSkipping ? Color::Green : Color::Red)
+                })
+            })));
     });
 
     screen.Loop(renderer);
+
     return 0;
 }
