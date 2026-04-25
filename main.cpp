@@ -10,6 +10,7 @@ using namespace ftxui;
 
 uint64_t grid[32];
 uint64_t nextGrid[32];
+uint32_t skipRow = 0;
 
 void setCell (int x, int y) {grid[x] |= (1ULL << y);}
 void clearCell (int x, int y) {grid[x] &= ~(1ULL << y);}
@@ -18,6 +19,14 @@ bool getCell (int x, int y) {return (grid[x] & (1ULL << y)) != 0;}
 void step(){
     memset(nextGrid, 0, sizeof(nextGrid));
     for (int i = 0; i < 32; i++) {
+        if (grid[i] == 0 && (i - 1 < 0 || grid[i - 1] == 0) && (i + 1 >= 32 || grid[i + 1] == 0)) {
+            skipRow |= (1ULL << i);
+            continue;
+        }
+        break;
+    }
+    for (int i = 0; i < 32; i++) {
+        //if (skipRow & (1ULL << i)) continue;
         for (int j = 0; j < 64; j++) {
             uint8_t cellNeighbours = 0;
             for (int x = -1; x <= 1; x++) {
@@ -49,26 +58,41 @@ setCell(8, 11); setCell(8, 17); setCell(8, 25);
 setCell(9, 12); setCell(9, 16);
 setCell(10, 13); setCell(10, 14);
 
-    auto screen = ftxui::ScreenInteractive::Fullscreen();
-
+    auto screen = ScreenInteractive::Fullscreen();
+    auto duration = std::chrono::duration<double, std::micro>(0);
+    auto averageDuration = std::chrono::duration<double, std::micro>(0);
+    int stepCount = 0;
     std::thread([&] {
         while (true) {
+            auto start = std::chrono::high_resolution_clock::now();
             step();
-            screen.PostEvent(ftxui::Event::Custom);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            auto end = std::chrono::high_resolution_clock::now();
+            stepCount++;
+            duration = std::chrono::duration<double, std::micro>(end - start);
+            averageDuration = ((averageDuration * (stepCount - 1)) + duration) / stepCount;
+            screen.PostEvent(Event::Custom);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
     }).detach();
 
     auto renderer = ftxui::Renderer([&] {
-        ftxui::Elements rows;
+        Elements rows;
         for (int i = 0; i < 32; i++) {
-            ftxui::Elements cells;
+            Elements cells;
             for (int j = 0; j < 64; j++) {
-                cells.push_back(getCell(i, j) ? ftxui::text("O") : ftxui::text(" "));
+                cells.push_back(getCell(i, j) ? text("O") : text(" "));
             }
-            rows.push_back(ftxui::hbox(cells));
+            rows.push_back(hbox(cells));
         }
-        return ftxui::vbox(rows);
+        return hbox(
+            border(vbox(rows)),
+            vbox({
+                text("Conway's Game of Life"),
+                text("Gosper Glider Gun"),
+                text("Press Ctrl+C to exit"),
+                text("stepTime: " + std::to_string(duration.count()) + " us"),
+                text("Average time per step: " + std::to_string(averageDuration.count()) + " us")
+            }));
     });
 
     screen.Loop(renderer);
